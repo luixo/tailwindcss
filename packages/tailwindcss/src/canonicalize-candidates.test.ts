@@ -1445,6 +1445,20 @@ describe('theme to var', () => {
 })
 
 describe('options', () => {
+  test('cached declaration values respect the root font size across utilities', async () => {
+    let designSystem = await __unstable__loadDesignSystem(css`
+      @tailwind utilities;
+      @theme {
+        --spacing: 0.25rem;
+      }
+    `)
+
+    expect(designSystem.canonicalizeCandidates(['m-[16px]'], { rem: 16 })).toEqual(['m-4'])
+    expect(designSystem.canonicalizeCandidates(['p-[16px]'], { rem: 32 })).toEqual(['p-2'])
+    expect(designSystem.canonicalizeCandidates(['px-[16px]'], { rem: 16 })).toEqual(['px-4'])
+    expect(designSystem.canonicalizeCandidates(['p-[16px]'])).toEqual(['p-[16px]'])
+  })
+
   test('normalize `rem` units to `px`', { timeout }, async () => {
     let designSystem = await __unstable__loadDesignSystem(
       css`

@@ -98,6 +98,7 @@ interface DesignSystem extends BaseDesignSystem {
     [SPACING_KEY]: DefaultMap<string, number | null> | null
     [UTILITY_SIGNATURE_KEY]: DefaultMap<SignatureOptions, DefaultMap<string, string | symbol>>
     [UTILITY_THEME_VARIABLES_KEY]: DefaultMap<SignatureOptions, DefaultMap<string, string[] | null>>
+    [CANONICALIZE_VALUE_KEY]: DefaultMap<RemValue, DefaultMap<string, string>>
     [STATIC_UTILITIES_KEY]: DefaultMap<
       SignatureOptions,
       DefaultMap<string, DefaultMap<string, Set<string>>>
@@ -128,6 +129,7 @@ export function prepareDesignSystemStorage(
   designSystem.storage[UTILITY_SIGNATURE_KEY] ??= createUtilitySignatureCache(designSystem)
   designSystem.storage[UTILITY_THEME_VARIABLES_KEY] ??=
     createUtilityThemeVariablesCache(designSystem)
+  designSystem.storage[CANONICALIZE_VALUE_KEY] ??= createCanonicalizeValueCache()
   designSystem.storage[STATIC_UTILITIES_KEY] ??= createStaticUtilitiesCache()
   designSystem.storage[UTILITY_PROPERTIES_KEY] ??= createUtilityPropertiesCache(designSystem)
   designSystem.storage[PRE_COMPUTED_UTILITIES_KEY] ??= createPreComputedUtilitiesCache(designSystem)
@@ -2631,6 +2633,37 @@ const TW_VARIABLE_PROPERTIES: Record<string, string> = {
   '--tw-tracking': 'letter-spacing',
 }
 
+const CANONICALIZE_VALUE_KEY = Symbol()
+function createCanonicalizeValueCache(): DesignSystem['storage'][typeof CANONICALIZE_VALUE_KEY] {
+  return new DefaultMap((rem: RemValue) => {
+    return new DefaultMap((value: string) => {
+      let valueAst = ValueParser.parse(value)
+
+      // Very basic `calc(…)` constant folding to handle the spacing scale
+      // multiplier:
+      //
+      // Input:  `--spacing(4)`
+      //       → `calc(var(--spacing, 0.25rem) * 4)`
+      //       → `calc(0.25rem * 4)`       ← this is the case we will see
+      //                                     after inlining the variable
+      //       → `1rem`
+      let [folded, foldedValueAst] = constantFoldDeclarationAst(valueAst, rem)
+
+      // Normalize `calc(…)` expressions such that arguments that are
+      // associatively equivalent are rendered in the same way.
+      //
+      // `calc(var(--foo) * -1)` === `calc(-1 * var(--foo))`
+      let [normalized, canonicalizedValueAst] = canonicalizeCalcExpressionsAst(foldedValueAst)
+
+      if (folded || normalized) {
+        value = ValueParser.toCss(canonicalizedValueAst)
+      }
+
+      return printArbitraryValue(value)
+    })
+  })
+}
+
 // Optimize the CSS AST to make it suitable for signature comparison. We want to
 // expand declarations, ignore comments, sort declarations etc...
 //
@@ -2642,7 +2675,7 @@ function canonicalizeAst(
   options: SignatureOptions,
   themeVariables?: DefaultMap<AstNode, Set<string>>,
 ) {
-  let { rem } = options
+  let values = designSystem.storage[CANONICALIZE_VALUE_KEY].get(options.rem)
 
   walk(ast, {
     enter(node, ctx) {
@@ -2678,34 +2711,8 @@ function canonicalizeAst(
           node.value = resolveVariablesInValue(node.value, designSystem, themeVariables?.get(node))
         }
 
-        let valueAst = ValueParser.parse(node.value)
-
-        // Very basic `calc(…)` constant folding to handle the spacing scale
-        // multiplier:
-        //
-        // Input:  `--spacing(4)`
-        //       → `calc(var(--spacing, 0.25rem) * 4)`
-        //       → `calc(0.25rem * 4)`       ← this is the case we will see
-        //                                     after inlining the variable
-        //       → `1rem`
-        let [folded, foldedValueAst] = constantFoldDeclarationAst(valueAst, rem)
-
-        // Normalize `calc(…)` expressions such that arguments that are
-        // associatively equivalent are rendered in the same way.
-        //
-        // `calc(var(--foo) * -1)` === `calc(-1 * var(--foo))`
-        let [normalized, canonicalizedValueAst] = canonicalizeCalcExpressionsAst(foldedValueAst)
-
-        if (folded || normalized) {
-          node.value = ValueParser.toCss(canonicalizedValueAst)
-        }
-
-        // We will normalize the `node.value`, this is the same kind of logic
-        // we use when printing arbitrary values. It will remove unnecessary
-        // whitespace.
-        //
-        // Essentially normalizing the `node.value` to a canonical form.
-        node.value = printArbitraryValue(node.value)
+        // Reuse normalization across signature and property lookups, after tracking theme variables.
+        node.value = values.get(node.value)
       }
 
       // Replace special nodes with its children
